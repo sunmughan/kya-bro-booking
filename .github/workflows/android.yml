@@ -1,0 +1,45 @@
+name: Android build
+
+# Local sandbox builds are blocked: Gradle's HTTP client cannot reach
+# dl.google.com through the sandbox egress proxy (curl can, Gradle cannot),
+# so the release APK/AAB are built here on GitHub Actions, which has
+# unrestricted Maven access. No secrets are used: Firebase config and the
+# Razorpay key are placeholders until the owner supplies them at build time.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.35.4"
+          channel: stable
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+      - run: flutter build apk --release
+      - run: flutter build appbundle --release
+      - run: |
+          cp build/app/outputs/flutter-apk/app-release.apk /tmp/kya-bro-public.apk
+          cp build/app/outputs/bundle/release/app-release.aab /tmp/kya-bro-public.aab
+      - run: flutter build apk --release -t lib/main_admin.dart
+      - run: |
+          cp build/app/outputs/flutter-apk/app-release.apk /tmp/kya-bro-admin.apk
+          ls -lh /tmp/kya-bro-*.apk /tmp/kya-bro-*.aab
+          sha256sum /tmp/kya-bro-*.apk /tmp/kya-bro-*.aab
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kya-bro-android
+          path: |
+            /tmp/kya-bro-public.apk
+            /tmp/kya-bro-admin.apk
+            /tmp/kya-bro-public.aab
