@@ -1,10 +1,16 @@
 name: Android build
 
-# Local sandbox builds are blocked: Gradle's HTTP client cannot reach
-# dl.google.com through the sandbox egress proxy (curl can, Gradle cannot),
-# so the release APK/AAB are built here on GitHub Actions, which has
-# unrestricted Maven access. No secrets are used: Firebase config and the
-# Razorpay key are placeholders until the owner supplies them at build time.
+# Builds run here on GitHub Actions (local sandbox Gradle builds are blocked
+# by the egress proxy). Build code only: the owner builds/releases from
+# these artifacts or from this workflow; no APK is built locally.
+#
+# Razorpay key ID is NOT baked in from this file: the booking app reads it
+# from Firebase at runtime (admin Payments tab). The optional
+# RAZORPAY_KEY_ID GitHub secret below is only a build-time fallback for
+# builds made before the admin entry exists. GitHub masks secret values in
+# logs. Firebase options likewise come from --dart-define only if the owner
+# sets those secrets; otherwise the app shows its honest not-connected
+# banner until Firebase is configured (see README).
 on:
   push:
     branches: [main]
@@ -26,12 +32,22 @@ jobs:
       - run: flutter pub get
       - run: flutter analyze --no-fatal-infos
       - run: flutter test
-      - run: flutter build apk --release
+      - run: |
+          DEFINE=""
+          if [ -n "${{ secrets.RAZORPAY_KEY_ID }}" ]; then
+            DEFINE="--dart-define=RAZORPAY_KEY_ID=${{ secrets.RAZORPAY_KEY_ID }}"
+          fi
+          flutter build apk --release $DEFINE
       - run: flutter build appbundle --release
       - run: |
           cp build/app/outputs/flutter-apk/app-release.apk /tmp/kya-bro-public.apk
           cp build/app/outputs/bundle/release/app-release.aab /tmp/kya-bro-public.aab
-      - run: flutter build apk --release -t lib/main_admin.dart
+      - run: |
+          DEFINE=""
+          if [ -n "${{ secrets.RAZORPAY_KEY_ID }}" ]; then
+            DEFINE="--dart-define=RAZORPAY_KEY_ID=${{ secrets.RAZORPAY_KEY_ID }}"
+          fi
+          flutter build apk --release -t lib/main_admin.dart $DEFINE
       - run: |
           cp build/app/outputs/flutter-apk/app-release.apk /tmp/kya-bro-admin.apk
           ls -lh /tmp/kya-bro-*.apk /tmp/kya-bro-*.aab

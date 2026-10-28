@@ -5,6 +5,7 @@ service cloud.firestore {
     // plans/slots without a login.
     match /content/{doc} { allow read: if true; allow write: if true; }
     match /plans/{plan} { allow read: if true; allow write: if true; }
+    match /viralPicks/{pick} { allow read: if true; allow write: if true; }
     match /slots/{slot} { allow read: if true; allow write: if true; }
     match /blockedDays/{day} { allow read: if true; allow write: if true; }
     // Bookings: anyone may read (to show their booking) and create via the

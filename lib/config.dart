@@ -1,8 +1,13 @@
 // App configuration. PLACEHOLDERS ONLY — no real keys or secrets live here.
-// Pass real values at build time with --dart-define, never by editing a
-// secret into this file, e.g.:
-//   flutter build apk --dart-define=RAZORPAY_KEY_ID=rzp_live_xxxx \
-//                     --dart-define=FIREBASE_API_KEY=xxxx ...
+//
+// Razorpay key ID flow (confirmed by the owner): the key ID is NEVER in
+// this repo. The owner enters it in the admin app's Payments tab, it is
+// saved as the `content/settings` Firestore document, and the booking app
+// reads it from Firebase at runtime. The build-time --dart-define below is
+// only a last-resort fallback for builds made before the admin entry
+// exists. The Razorpay SECRET never appears here, in Firestore, or in
+// either app: it lives only as a Cloud Functions secret, used server-side
+// for order creation and signature verification.
 // Firebase itself is configured the supported way: run
 // `flutterfire configure` in the Firebase console step (see README) and it
 // replaces the placeholder FirebaseOptions below. Until then Firebase

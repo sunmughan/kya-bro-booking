@@ -139,10 +139,11 @@ class FirestoreService {
   static Future<void> setBookingStatus(String id, String status) =>
       _db.collection('bookings').doc(id).update({'status': status});
 
-  /// Writes the owner-editable starter content (identity/contact only).
-  /// Engagement numbers and prices are deliberately NOT seeded: they stay
-  /// empty/TBD until the owner fills them in the admin app, so the public
-  /// app never shows invented numbers. Run once from the admin dashboard.
+  /// Writes the owner-editable starter content (identity only).
+  /// Followers, phone, email, engagement numbers and prices are
+  /// deliberately NOT seeded: they stay empty until the owner fills them
+  /// in the admin app (or the stats refresh function writes real values),
+  /// so the public app never shows an unconfirmed number as fact.
   static Future<void> seedStarterContent() async {
     await saveProfile({
       'displayName': 'Kya Bro',
@@ -150,11 +151,53 @@ class FirestoreService {
       'handle': '@_kya_bro_',
       'city': 'Durg-Bhilai',
       'contentStyle': 'Comedy, roasts, reactions and vlogs',
-      'followersText': '32.4K followers on Instagram',
-      'phone': '9165942112',
-      'email': 'to confirm',
       'bio': 'Book Kya Bro to make a video for you.',
     });
     await saveSettings({'nextDayMultiplier': 1.25});
   }
+
+  // ---- Real-time tracking: creator stats, viral picks, SMTP config ----
+  static Stream<CreatorStats?> statsStream() => _db
+      .collection('content')
+      .doc('stats')
+      .snapshots()
+      .map((d) => d.data() == null ? null : CreatorStats.fromMap(d.data()!));
+
+  static Future<void> saveStats(Map<String, dynamic> data) =>
+      _db.collection('content').doc('stats').set(data, SetOptions(merge: true));
+
+  static Stream<List<ViralPick>> viralPicksStream() => _db
+      .collection('viralPicks')
+      .orderBy('fetchedAt', descending: true)
+      .snapshots()
+      .map((s) =>
+          s.docs.map((d) => ViralPick.fromMap(d.data(), d.id)).toList());
+
+  static Future<void> saveViralPick(Map<String, dynamic> data) =>
+      _db.collection('viralPicks').add({
+        ...data,
+        'fetchedAt': FieldValue.serverTimestamp(),
+      });
+
+  static Future<void> deleteViralPick(String id) =>
+      _db.collection('viralPicks').doc(id).delete();
+
+  static Stream<SmtpConfig?> smtpStream() => _db
+      .collection('content')
+      .doc('smtp')
+      .snapshots()
+      .map((d) => d.data() == null ? null : SmtpConfig.fromMap(d.data()!));
+
+  /// Saves NON-SECRET SMTP fields only. The password is never written here:
+  /// it is a Cloud Functions secret set by the owner via the Firebase CLI.
+  static Future<void> saveSmtpConfig(Map<String, dynamic> data) =>
+      _db.collection('content').doc('smtp').set(data, SetOptions(merge: true));
+
+  // ---- Payments ----
+  static Future<void> setBookingPaymentStatus(String id, String status) =>
+      _db.collection('bookings').doc(id).update({'paymentStatus': status});
+
+  static Future<void> saveBookingPaymentDetails(
+          String id, Map<String, dynamic> data) =>
+      _db.collection('bookings').doc(id).update(data);
 }

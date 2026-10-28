@@ -2,6 +2,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'config.dart';
 import 'firestore_service.dart';
+import 'functions_service.dart';
 import 'models.dart';
 
 /// ADMIN APP — second entry point of the same project.
@@ -57,7 +58,7 @@ class _AdminHomeState extends State<AdminHome> {
         body: const Center(child: Padding(padding: EdgeInsets.all(24), child: Text('Firebase is not connected yet. Complete the Firebase console step in the README, then the admin app can manage content, plans, slots and bookings.'))),
       );
     }
-    final pages = [const DashboardPage(), const PlansPage(), const BookingsPage(), const ContentPage(), const SlotsPage()];
+    final pages = [const DashboardPage(), const PlansPage(), const PaymentsPage(), const BookingsPage(), const ContentPage(), const SlotsPage(), const SmtpPage()];
     return Scaffold(
       appBar: AppBar(title: const Text('Kya Bro Admin')),
       body: pages[_tab],
@@ -68,9 +69,11 @@ class _AdminHomeState extends State<AdminHome> {
         items: const [
           BottomNavigationBarItem(icon: Icon(Icons.dashboard), label: 'Dashboard'),
           BottomNavigationBarItem(icon: Icon(Icons.list), label: 'Plans'),
+          BottomNavigationBarItem(icon: Icon(Icons.payment), label: 'Payments'),
           BottomNavigationBarItem(icon: Icon(Icons.book), label: 'Bookings'),
           BottomNavigationBarItem(icon: Icon(Icons.edit), label: 'Content'),
           BottomNavigationBarItem(icon: Icon(Icons.calendar_month), label: 'Slots'),
+          BottomNavigationBarItem(icon: Icon(Icons.email), label: 'SMTP'),
         ],
       ),
     );
@@ -240,6 +243,188 @@ class _PlanEditor extends StatelessWidget {
   }
 }
 
+class PaymentsPage extends StatefulWidget {
+  const PaymentsPage({super.key});
+  @override
+  State<PaymentsPage> createState() => _PaymentsPageState();
+}
+
+/// Razorpay setup, exactly as the owner confirmed it:
+/// - The KEY ID is entered here and saved into the `content/settings`
+///   Firestore document. The booking app reads it from Firebase at runtime.
+///   The key ID is a publishable checkout identifier, not a secret.
+/// - The SECRET is never entered here, never saved in Firestore, never in
+///   the repo or either app. It lives only as a Cloud Functions secret,
+///   set by the owner with:
+///     firebase functions:secrets:set RAZORPAY_SECRET
+///   then `firebase deploy --only functions`.
+/// Payment statuses flow: pending_payment -> paid / failed. `failed` is set
+/// only by server signature verification; a dismissed checkout stays
+/// pending_payment so the booker can retry. The owner can also confirm or
+/// fail a payment manually here.
+class _PaymentsPageState extends State<PaymentsPage> {
+  final _key = TextEditingController();
+  bool _keyLoaded = false;
+  @override
+  Widget build(BuildContext context) {
+    return ListView(padding: const EdgeInsets.all(16), children: [
+      const Text('Razorpay setup', style: TextStyle(fontWeight: FontWeight.bold)),
+      StreamBuilder<AppSettings>(
+        stream: FirestoreService.settingsStream(),
+        builder: (c, s) {
+          if (!_keyLoaded) {
+            _key.text = s.data?.razorpayKeyId ?? '';
+            _keyLoaded = true;
+          }
+          final set = s.data?.razorpayKeyId != null && s.data!.razorpayKeyId!.isNotEmpty;
+          return Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('Key ID status: ${set ? 'SET (booking app reads it from Firebase)' : 'NOT SET — payments stay pending until you set it'}'),
+                const SizedBox(height: 8),
+                TextField(controller: _key, decoration: const InputDecoration(labelText: 'Razorpay Key ID (starts with rzp_)', border: OutlineInputBorder())),
+                const SizedBox(height: 8),
+                FilledButton(
+                  onPressed: () async {
+                    final v = _key.text.trim();
+                    if (v.isEmpty || !v.startsWith('rzp_')) {
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter a Razorpay Key ID starting with rzp_.')));
+                      return;
+                    }
+                    await FirestoreService.saveSettings({'razorpayKeyId': v});
+                    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Key ID saved to Firebase. The booking app picks it up at runtime, no rebuild needed.')));
+                  },
+                  child: const Text('Save Key ID to Firebase'),
+                ),
+                const SizedBox(height: 8),
+                const Text('Secret: NEVER type it here. Set it once with `firebase functions:secrets:set RAZORPAY_SECRET` and deploy functions. The secret is used server-side only, for order creation and signature verification.', style: TextStyle(fontSize: 12, color: Colors.grey)),
+              ]),
+            ),
+          );
+        },
+      ),
+      const SizedBox(height: 16),
+      const Text('Payments by booking', style: TextStyle(fontWeight: FontWeight.bold)),
+      StreamBuilder<List<Booking>>(
+        stream: FirestoreService.bookingsStream(),
+        builder: (c, s) {
+          final bookings = s.data ?? [];
+          if (bookings.isEmpty) return const Padding(padding: EdgeInsets.all(16), child: Text('No bookings yet.'));
+          return Column(
+            children: bookings.map((b) => Card(
+              child: ListTile(
+                title: Text('${b.name} — total ${b.totalPrice == null ? 'TBD' : b.totalPrice.toString()}'),
+                subtitle: Text('Payment: ${b.paymentStatus}${b.razorpayPaymentId != null ? ' • pay id ${b.razorpayPaymentId}' : ''}${b.paymentVerification != null ? ' • ${b.paymentVerification}' : ''}'),
+                trailing: PopupMenuButton<String>(
+                  onSelected: (v) => FirestoreService.setBookingPaymentStatus(b.id, v),
+                  itemBuilder: (_) => const [
+                    PopupMenuItem(value: 'paid', child: Text('Mark paid')),
+                    PopupMenuItem(value: 'failed', child: Text('Mark failed')),
+                    PopupMenuItem(value: 'pending_payment', child: Text('Back to pending')),
+                  ],
+                ),
+              ),
+            )).toList(),
+          );
+        },
+      ),
+    ]);
+  }
+}
+
+class SmtpPage extends StatefulWidget {
+  const SmtpPage({super.key});
+  @override
+  State<SmtpPage> createState() => _SmtpPageState();
+}
+
+/// SMTP configuration inside the admin app.
+/// - Host, port, user, sender, owner email and test recipient are saved to
+///   the `content/smtp` Firestore document (non-secret fields only).
+/// - The SMTP account is sunmughan@gmail.com. The password field below is
+///   used ONLY for the test send tapped right after typing it: it is sent
+///   to the test-mail function for that one send and is never stored
+///   anywhere (not in Firestore, not in the repo, not in the app).
+/// - Booking notification mail does NOT use the typed password: it uses the
+///   SMTP_PASS Cloud Functions secret, set by the owner with:
+///     firebase functions:secrets:set SMTP_PASS
+///   then `firebase deploy --only functions`.
+/// - Test mail goes ONLY to the test recipient (default sunmughan@gmail.com).
+///   Booking mail goes ONLY to the owner email, never to the test recipient.
+class _SmtpPageState extends State<SmtpPage> {
+  final _host = TextEditingController(), _port = TextEditingController(), _user = TextEditingController(), _from = TextEditingController(), _owner = TextEditingController(), _testTo = TextEditingController(), _pass = TextEditingController();
+  bool _loaded = false;
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<SmtpConfig?>(
+      stream: FirestoreService.smtpStream(),
+      builder: (c, s) {
+        if (!_loaded) {
+          final cfg = s.data;
+          _host.text = cfg?.host ?? '';
+          _port.text = cfg?.port?.toString() ?? '587';
+          _user.text = cfg?.user ?? 'sunmughan@gmail.com';
+          _from.text = cfg?.from ?? 'sunmughan@gmail.com';
+          _owner.text = cfg?.ownerEmail ?? '';
+          _testTo.text = cfg?.testRecipient ?? 'sunmughan@gmail.com';
+          _loaded = true;
+        }
+        return ListView(padding: const EdgeInsets.all(16), children: [
+          const Text('SMTP configuration (account: sunmughan@gmail.com)', style: TextStyle(fontWeight: FontWeight.bold)),
+          TextField(controller: _host, decoration: const InputDecoration(labelText: 'SMTP host (e.g. smtp.gmail.com)')),
+          TextField(controller: _port, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Port (587)')),
+          TextField(controller: _user, decoration: const InputDecoration(labelText: 'SMTP user')),
+          TextField(controller: _from, decoration: const InputDecoration(labelText: 'Sender address (from)')),
+          TextField(controller: _owner, decoration: const InputDecoration(labelText: 'Owner email (booking notifications go here)')),
+          TextField(controller: _testTo, decoration: const InputDecoration(labelText: 'Test recipient (test mail only)')),
+          const SizedBox(height: 8),
+          FilledButton(
+            onPressed: () async {
+              await FirestoreService.saveSmtpConfig({
+                'host': _host.text.trim(),
+                'port': int.tryParse(_port.text) ?? 587,
+                'user': _user.text.trim(),
+                'from': _from.text.trim(),
+                'ownerEmail': _owner.text.trim(),
+                'testRecipient': _testTo.text.trim(),
+              });
+              if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('SMTP settings saved (non-secret fields only). Password is never saved.')));
+            },
+            child: const Text('Save SMTP settings'),
+          ),
+          const SizedBox(height: 16),
+          const Text('SMTP password — test send only, never stored', style: TextStyle(fontWeight: FontWeight.bold)),
+          TextField(controller: _pass, obscureText: true, decoration: const InputDecoration(labelText: 'SMTP password / app password (not saved anywhere)', border: OutlineInputBorder())),
+          const SizedBox(height: 8),
+          FilledButton(
+            onPressed: () async {
+              try {
+                final r = _pass.text.isEmpty
+                    ? await FunctionsService.sendTestMail()
+                    : await FunctionsService.sendTestMail({
+                        'host': _host.text.trim(),
+                        'port': int.tryParse(_port.text) ?? 587,
+                        'user': _user.text.trim(),
+                        'pass': _pass.text,
+                        'from': _from.text.trim(),
+                        'to': _testTo.text.trim(),
+                      });
+                if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Test mail result: ${r['sent'] == true ? 'sent to ${r['to']}' : r['status'] ?? r}')));
+              } catch (e) {
+                if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Test mail failed: $e')));
+              }
+            },
+            child: const Text('Send test mail'),
+          ),
+          const SizedBox(height: 8),
+          const Text('Booking mail uses the SMTP_PASS function secret, not the password typed above. Set it with `firebase functions:secrets:set SMTP_PASS` and deploy functions. Without it, booking mail is skipped and logged, never faked as sent.', style: TextStyle(fontSize: 12, color: Colors.grey)),
+        ]);
+      },
+    );
+  }
+}
+
 class BookingsPage extends StatelessWidget {
   const BookingsPage({super.key});
   @override
@@ -271,6 +456,8 @@ class BookingsPage extends StatelessWidget {
                     TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
                     FilledButton(onPressed: () { FirestoreService.setBookingStatus(b.id, 'confirmed'); Navigator.pop(context); }, child: const Text('Confirm')),
                     FilledButton(onPressed: () { FirestoreService.setBookingStatus(b.id, 'done'); Navigator.pop(context); }, child: const Text('Done')),
+                    TextButton(onPressed: () { FirestoreService.setBookingPaymentStatus(b.id, 'paid'); Navigator.pop(context); }, child: const Text('Mark paid')),
+                    TextButton(onPressed: () { FirestoreService.setBookingPaymentStatus(b.id, 'failed'); Navigator.pop(context); }, child: const Text('Mark failed')),
                   ],
                 ),
               ),
@@ -292,10 +479,60 @@ class _ContentPageState extends State<ContentPage> {
   final _display = TextEditingController(), _creator = TextEditingController(), _handle = TextEditingController(), _city = TextEditingController(), _style = TextEditingController(), _followers = TextEditingController(), _phone = TextEditingController(), _email = TextEditingController(), _bio = TextEditingController();
   final _viralTitle = TextEditingController(), _viralUrl = TextEditingController(), _viralNote = TextEditingController();
   final _wViews = TextEditingController(), _wLikes = TextEditingController(), _wComments = TextEditingController(), _wShares = TextEditingController(), _mViews = TextEditingController(), _mLikes = TextEditingController(), _mComments = TextEditingController(), _mShares = TextEditingController();
+  final _manualFollowers = TextEditingController();
   bool _loaded = false;
   @override
   Widget build(BuildContext context) {
     return ListView(padding: const EdgeInsets.all(16), children: [
+      const Text('Real-time stats (Himanshu @_kya_bro_)', style: TextStyle(fontWeight: FontWeight.bold)),
+      StreamBuilder<CreatorStats?>(
+        stream: FirestoreService.statsStream(),
+        builder: (c, s) {
+          final st = s.data;
+          return Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(st == null || st.isEmpty ? 'No stats stored yet.' : 'Followers: ${st.followersCount ?? '—'} • Posts: ${st.mediaCount ?? '—'} • Source: ${st.source ?? '—'}${st.updatedAtIso != null ? ' • Updated: ${st.updatedAtIso}' : ''}'),
+                if (st?.lastError != null) Text('Last refresh note: ${st!.lastError}', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                const SizedBox(height: 8),
+                Row(children: [
+                  Expanded(
+                    child: FilledButton(
+                      onPressed: () async {
+                        try {
+                          final r = await FunctionsService.refreshCreatorStats();
+                          if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Stats refresh: ${r['status'] ?? r}')));
+                        } catch (e) {
+                          if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Stats refresh failed: $e')));
+                        }
+                      },
+                      child: const Text('Refresh from Instagram'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(child: TextField(controller: _manualFollowers, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Manual followers', border: OutlineInputBorder()))),
+                  const SizedBox(width: 8),
+                  FilledButton(
+                    onPressed: () async {
+                      final v = int.tryParse(_manualFollowers.text);
+                      if (v == null) {
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter a follower count first.')));
+                        return;
+                      }
+                      await FirestoreService.saveStats({'followersCount': v, 'source': 'manual', 'updatedAt': DateTime.now().toIso8601String(), 'lastError': null});
+                      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Manual followers saved and marked as owner-set.')));
+                    },
+                    child: const Text('Save manual'),
+                  ),
+                ]),
+                const Text('Live fetch needs an Instagram access token secret (INSTAGRAM_ACCESS_TOKEN) on the functions. Without it the refresh reports "needs token" and writes nothing — numbers are never guessed. Manual entries are always labelled as owner-set in the public app.', style: TextStyle(fontSize: 12, color: Colors.grey)),
+              ]),
+            ),
+          );
+        },
+      ),
+      const SizedBox(height: 16),
       const Text('Profile', style: TextStyle(fontWeight: FontWeight.bold)),
       TextField(controller: _display, decoration: const InputDecoration(labelText: 'Display name')),
       TextField(controller: _creator, decoration: const InputDecoration(labelText: 'Creator name')),
@@ -304,7 +541,7 @@ class _ContentPageState extends State<ContentPage> {
       TextField(controller: _style, decoration: const InputDecoration(labelText: 'Content style')),
       TextField(controller: _followers, decoration: const InputDecoration(labelText: 'Followers text')),
       TextField(controller: _phone, decoration: const InputDecoration(labelText: 'Phone (public bio number)')),
-      TextField(controller: _email, decoration: const InputDecoration(labelText: 'Email (or "to confirm")')),
+      TextField(controller: _email, decoration: const InputDecoration(labelText: 'Email')),
       TextField(controller: _bio, decoration: const InputDecoration(labelText: 'Bio')),
       FilledButton(
         onPressed: () async {
@@ -324,6 +561,33 @@ class _ContentPageState extends State<ContentPage> {
           if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Viral pick saved.')));
         },
         child: const Text('Save viral pick'),
+      ),
+      const SizedBox(height: 8),
+      FilledButton(
+        onPressed: () async {
+          if (_viralTitle.text.trim().isEmpty) {
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter a title first.')));
+            return;
+          }
+          await FirestoreService.saveViralPick({'title': _viralTitle.text.trim(), 'videoUrl': _viralUrl.text.trim(), 'note': _viralNote.text.trim(), 'source': 'manual'});
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Added to the viral videos list shown in the public app.')));
+        },
+        child: const Text('Add to viral videos list'),
+      ),
+      const SizedBox(height: 8),
+      StreamBuilder<List<ViralPick>>(
+        stream: FirestoreService.viralPicksStream(),
+        builder: (c, s) {
+          final picks = s.data ?? [];
+          if (picks.isEmpty) return const Text('No viral videos in the list yet. Newest first; the public app shows the top 3.', style: TextStyle(fontSize: 12, color: Colors.grey));
+          return Column(
+            children: picks.map((v) => ListTile(
+              title: Text(v.title ?? 'Untitled video'),
+              subtitle: v.note == null || v.note!.isEmpty ? null : Text(v.note!),
+              trailing: v.id == null ? null : IconButton(icon: const Icon(Icons.delete), onPressed: () => FirestoreService.deleteViralPick(v.id!)),
+            )).toList(),
+          );
+        },
       ),
       const SizedBox(height: 16),
       const Text('Engagement — week / month (empty = updated-by-owner state, never guessed)', style: TextStyle(fontWeight: FontWeight.bold)),

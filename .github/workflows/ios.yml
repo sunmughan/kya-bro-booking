@@ -1,0 +1,47 @@
+name: iOS build
+
+# Build code only for iOS: macOS runner, unsigned release .app bundles for
+# the public app and the admin app. An unsigned .app is NOT installable on
+# a real device as-is; the owner signs it for distribution (see README
+# "iOS signing") or builds a signed IPA locally with their Apple account.
+# No signing certificates or provisioning profiles live in this repo.
+# Razorpay key ID is read from Firebase at runtime (admin Payments tab);
+# the optional RAZORPAY_KEY_ID GitHub secret is only a build-time fallback.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.35.4"
+          channel: stable
+      - run: flutter pub get
+      - run: flutter analyze --no-fatal-infos
+      - run: flutter test
+      - run: |
+          DEFINE=""
+          if [ -n "${{ secrets.RAZORPAY_KEY_ID }}" ]; then
+            DEFINE="--dart-define=RAZORPAY_KEY_ID=${{ secrets.RAZORPAY_KEY_ID }}"
+          fi
+          flutter build ios --release --no-codesign $DEFINE
+          cp -r build/ios/iphoneos/Runner.app /tmp/kya-bro-public.app
+      - run: |
+          DEFINE=""
+          if [ -n "${{ secrets.RAZORPAY_KEY_ID }}" ]; then
+            DEFINE="--dart-define=RAZORPAY_KEY_ID=${{ secrets.RAZORPAY_KEY_ID }}"
+          fi
+          flutter build ios --release --no-codesign -t lib/main_admin.dart $DEFINE
+          cp -r build/ios/iphoneos/Runner.app /tmp/kya-bro-admin.app
+          ls -lh /tmp/kya-bro-public.app /tmp/kya-bro-admin.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kya-bro-ios
+          path: |
+            /tmp/kya-bro-public.app
+            /tmp/kya-bro-admin.app

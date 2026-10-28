@@ -33,9 +33,10 @@ class Profile {
 }
 
 class ViralPick {
-  final String? title, videoUrl, note;
-  const ViralPick({this.title, this.videoUrl, this.note});
-  factory ViralPick.fromMap(Map<String, dynamic> m) => ViralPick(
+  final String? id, title, videoUrl, note;
+  const ViralPick({this.id, this.title, this.videoUrl, this.note});
+  factory ViralPick.fromMap(Map<String, dynamic> m, [String? id]) => ViralPick(
+        id: id,
         title: m['title'] as String?,
         videoUrl: m['videoUrl'] as String?,
         note: m['note'] as String?,
@@ -89,11 +90,68 @@ class Plan {
 
 class AppSettings {
   final double nextDayMultiplier; // owner-set, clamped to 1.25..1.30
-  const AppSettings({required this.nextDayMultiplier});
+  final String? razorpayKeyId; // owner-set in admin Payments tab; null = unset
+  const AppSettings({required this.nextDayMultiplier, this.razorpayKeyId});
   factory AppSettings.fromMap(Map<String, dynamic> m) {
     final v = (m['nextDayMultiplier'] as num?)?.toDouble() ?? 1.25;
-    return AppSettings(nextDayMultiplier: v < 1.25 || v > 1.30 ? 1.25 : v);
+    final key = (m['razorpayKeyId'] as String?)?.trim();
+    return AppSettings(
+      nextDayMultiplier: v < 1.25 || v > 1.30 ? 1.25 : v,
+      razorpayKeyId: key == null || key.isEmpty ? null : key,
+    );
   }
+}
+
+/// Creator stats for the real-time tracking pipeline. Values come ONLY from
+/// the stats refresh function (Instagram Graph API when the owner supplies a
+/// token) or from manual owner entry in the admin app. `source` records
+/// which one it was, so the public app never presents a manual number as a
+/// live platform number. Null followersCount = not set yet, shown honestly.
+class CreatorStats {
+  final int? followersCount, mediaCount;
+  final String? source; // 'instagram_graph' | 'manual' | null
+  final String? updatedAtIso, lastError;
+  const CreatorStats({
+    this.followersCount,
+    this.mediaCount,
+    this.source,
+    this.updatedAtIso,
+    this.lastError,
+  });
+  factory CreatorStats.fromMap(Map<String, dynamic> m) => CreatorStats(
+        followersCount: (m['followersCount'] as num?)?.toInt(),
+        mediaCount: (m['mediaCount'] as num?)?.toInt(),
+        source: m['source'] as String?,
+        updatedAtIso: m['updatedAt'] as String?,
+        lastError: m['lastError'] as String?,
+      );
+  bool get isEmpty => followersCount == null && mediaCount == null;
+}
+
+/// SMTP configuration. NON-SECRET fields only: host, port, user, sender,
+/// owner email, test recipient. The SMTP password is NEVER stored here, in
+/// the app, or in the repo — it lives only as a Cloud Functions secret
+/// (see README "SMTP secrets"), set by the owner via the Firebase CLI.
+class SmtpConfig {
+  final String? host, user, from, ownerEmail, testRecipient;
+  final int? port;
+  const SmtpConfig({
+    this.host,
+    this.user,
+    this.from,
+    this.ownerEmail,
+    this.testRecipient,
+    this.port,
+  });
+  factory SmtpConfig.fromMap(Map<String, dynamic> m) => SmtpConfig(
+        host: m['host'] as String?,
+        user: m['user'] as String?,
+        from: m['from'] as String?,
+        ownerEmail: m['ownerEmail'] as String?,
+        testRecipient: m['testRecipient'] as String?,
+        port: (m['port'] as num?)?.toInt(),
+      );
+  bool get isEmpty => host == null || host!.isEmpty;
 }
 
 /// A bookable time slot. Doc id: `YYYY-MM-DD_HHmm`.
@@ -133,6 +191,17 @@ class Slot {
       '${day.year.toString().padLeft(4, '0')}-'
       '${day.month.toString().padLeft(2, '0')}-'
       '${day.day.toString().padLeft(2, '0')}_$hhmm';
+
+  /// End time for an hourly slot: start + 60 minutes, wrapping past midnight
+  /// as 00:xx. Used instead of a "TBD" placeholder everywhere a slot end is
+  /// stored, so booking records always carry a real end time.
+  static String endTimeFor(String hhmm) {
+    final parts = hhmm.split(':');
+    final h = int.tryParse(parts[0]) ?? 0;
+    final m = parts.length > 1 ? int.tryParse(parts[1]) ?? 0 : 0;
+    final total = (h * 60 + m + 60) % (24 * 60);
+    return '${(total ~/ 60).toString().padLeft(2, '0')}:${(total % 60).toString().padLeft(2, '0')}';
+  }
 }
 
 /// Booking statuses: new -> confirmed -> done. Payment is separate:
@@ -143,6 +212,7 @@ class Booking {
   final int? storyCount, durationSeconds;
   final String? packageKind, urgencyTier;
   final double? multiplier, basePrice, totalPrice;
+  final String? razorpayPaymentId, razorpayOrderId, paymentVerification;
   const Booking({
     required this.id,
     required this.name,
@@ -161,6 +231,9 @@ class Booking {
     this.multiplier,
     this.basePrice,
     this.totalPrice,
+    this.razorpayPaymentId,
+    this.razorpayOrderId,
+    this.paymentVerification,
   });
   factory Booking.fromMap(String id, Map<String, dynamic> m) => Booking(
         id: id,
@@ -180,5 +253,8 @@ class Booking {
         multiplier: (m['multiplier'] as num?)?.toDouble(),
         basePrice: (m['basePrice'] as num?)?.toDouble(),
         totalPrice: (m['totalPrice'] as num?)?.toDouble(),
+        razorpayPaymentId: m['razorpayPaymentId'] as String?,
+        razorpayOrderId: m['razorpayOrderId'] as String?,
+        paymentVerification: m['paymentVerification'] as String?,
       );
 }

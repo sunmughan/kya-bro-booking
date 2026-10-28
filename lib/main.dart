@@ -5,6 +5,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'config.dart';
 import 'device_calendar_service.dart';
 import 'firestore_service.dart';
+import 'functions_service.dart';
 import 'models.dart';
 import 'payment_service.dart';
 import 'urgency.dart';
@@ -134,33 +135,91 @@ class HomePage extends StatelessWidget {
                 if (p.phone != null)
                   Padding(
                     padding: const EdgeInsets.only(top: 8),
-                    child: Text('Direct call: ${p.phone} (public bio number, to confirm)'),
+                    child: Text('Direct call: ${p.phone}'),
                   ),
-                if (p.email != null) Text('Email: ${p.email}'),
+                if (p.email != null &&
+                    p.email!.trim().isNotEmpty &&
+                    p.email!.trim().toLowerCase() != 'to confirm')
+                  Text('Email: ${p.email}'),
               ]),
             ),
           );
         },
       ),
       const SizedBox(height: 12),
-      StreamBuilder<ViralPick?>(
-        stream: FirestoreService.viralStream(),
+      StreamBuilder<List<ViralPick>>(
+        stream: FirestoreService.viralPicksStream(),
         builder: (c, s) {
-          final v = s.data;
-          if (v == null || v.isEmpty) {
-            return const Card(child: ListTile(title: Text('Recent viral video'), subtitle: Text('Viral pick updated by owner.')));
+          final picks = s.data ?? [];
+          if (picks.isNotEmpty) {
+            return Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const Text('Recent viral videos', style: TextStyle(fontWeight: FontWeight.bold)),
+                  ...picks.take(3).map((v) => ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(v.title ?? 'Untitled video'),
+                        subtitle: v.note == null ? null : Text(v.note!),
+                        trailing: v.videoUrl == null ? null : const Icon(Icons.play_circle),
+                        onTap: v.videoUrl == null
+                            ? null
+                            : () async {
+                                final uri = Uri.parse(v.videoUrl!);
+                                if (await canLaunchUrl(uri)) await launchUrl(uri, mode: LaunchMode.externalApplication);
+                              },
+                      )),
+                ]),
+              ),
+            );
           }
+          return StreamBuilder<ViralPick?>(
+            stream: FirestoreService.viralStream(),
+            builder: (c, s2) {
+              final v = s2.data;
+              if (v == null || v.isEmpty) {
+                return const Card(child: ListTile(title: Text('Recent viral video'), subtitle: Text('Viral pick updated by owner.')));
+              }
+              return Card(
+                child: ListTile(
+                  title: Text(v.title!),
+                  subtitle: v.note == null ? null : Text(v.note!),
+                  trailing: v.videoUrl == null ? null : const Icon(Icons.play_circle),
+                  onTap: v.videoUrl == null
+                      ? null
+                      : () async {
+                          final uri = Uri.parse(v.videoUrl!);
+                          if (await canLaunchUrl(uri)) await launchUrl(uri, mode: LaunchMode.externalApplication);
+                        },
+                ),
+              );
+            },
+          );
+        },
+      ),
+      const SizedBox(height: 12),
+      StreamBuilder<CreatorStats?>(
+        stream: FirestoreService.statsStream(),
+        builder: (c, s) {
+          final st = s.data;
+          if (st == null || st.isEmpty) {
+            return const Card(child: ListTile(title: Text('Creator stats'), subtitle: Text('Not set yet. The owner refreshes real stats from the admin app.')));
+          }
+          final sourceLabel = st.source == 'instagram_graph'
+              ? 'Instagram (live fetch)'
+              : st.source == 'manual'
+                  ? 'Set by owner'
+                  : 'Updated by owner';
           return Card(
-            child: ListTile(
-              title: Text(v.title!),
-              subtitle: v.note == null ? null : Text(v.note!),
-              trailing: v.videoUrl == null ? null : const Icon(Icons.play_circle),
-              onTap: v.videoUrl == null
-                  ? null
-                  : () async {
-                      final uri = Uri.parse(v.videoUrl!);
-                      if (await canLaunchUrl(uri)) await launchUrl(uri, mode: LaunchMode.externalApplication);
-                    },
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Text('Creator stats', style: TextStyle(fontWeight: FontWeight.bold)),
+                if (st.followersCount != null) Text('Followers: ${st.followersCount}'),
+                if (st.mediaCount != null) Text('Posts: ${st.mediaCount}'),
+                Text('$sourceLabel${st.updatedAtIso != null ? ' • updated ${st.updatedAtIso}' : ''}', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                if (st.lastError != null) Text('Last refresh note: ${st.lastError}', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+              ]),
             ),
           );
         },
@@ -266,7 +325,7 @@ class _BookingPageState extends State<BookingPage> {
         'packageKind': _package,
         'slotDate': '${_slotDay.year}-${_slotDay.month.toString().padLeft(2, '0')}-${_slotDay.day.toString().padLeft(2, '0')}',
         'slotStart': _slotTime,
-        'slotEnd': 'TBD',
+        'slotEnd': Slot.endTimeFor(_slotTime!),
         'deliveryDue': _deliveryDue!.toIso8601String(),
         'urgencyTier': urgency.tierName,
         'multiplier': urgency.multiplier,
@@ -277,7 +336,7 @@ class _BookingPageState extends State<BookingPage> {
       final id = await FirestoreService.bookSlotTransaction(
         bookingData: bookingData,
         slotId: slotId,
-        slotData: {'date': bookingData['slotDate'], 'startTime': _slotTime, 'endTime': 'TBD', 'status': 'booked'},
+        slotData: {'date': bookingData['slotDate'], 'startTime': _slotTime, 'endTime': Slot.endTimeFor(_slotTime!), 'status': 'booked'},
       );
       if (!mounted) return;
       Navigator.of(context).push(MaterialPageRoute(
@@ -468,6 +527,8 @@ class ConfirmationPage extends StatefulWidget {
 class _ConfirmationPageState extends State<ConfirmationPage> {
   String? _calendarNote;
   bool _paying = false;
+  String _paymentStatus = 'pending_payment';
+  String? _paymentNote;
   final PaymentService _payment = PaymentService();
   @override
   void initState() {
@@ -481,9 +542,115 @@ class _ConfirmationPageState extends State<ConfirmationPage> {
     super.dispose();
   }
 
+  Future<void> _refreshPaymentStatus() async {
+    final d = await FirebaseFirestore.instance.collection('bookings').doc(widget.bookingId).get();
+    final s = (d.data()?['paymentStatus'] as String?) ?? 'pending_payment';
+    if (mounted) setState(() => _paymentStatus = s);
+  }
+
+  /// Full payment flow (see PaymentService doc):
+  /// server order -> checkout -> server signature verification -> paid.
+  /// Without deployed functions: direct checkout fallback, booking stays
+  /// pending_payment with payment ids recorded for owner confirmation.
+  /// Verification failure -> failed. Gateway dismiss/failure -> stays
+  /// pending_payment so the booker can retry; nothing is faked as paid.
+  Future<void> _pay() async {
+    if (widget.totalPrice == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Total is TBD until the owner sets a price. Payment opens once a price exists.')));
+      return;
+    }
+    setState(() => _paying = true);
+    final payment = _payment;
+    try {
+      Map<String, dynamic>? order;
+      try {
+        order = await FunctionsService.createRazorpayOrder(bookingId: widget.bookingId);
+      } catch (_) {
+        order = null; // functions not deployed yet -> fallback below
+      }
+      if (order != null && order['orderId'] != null && order['keyId'] != null) {
+        payment.onSuccess = (pid, oid, sig) async {
+          try {
+            final v = await FunctionsService.verifyRazorpayPayment(
+              bookingId: widget.bookingId,
+              paymentId: pid,
+              orderId: oid,
+              signature: sig,
+            );
+            if (v['verified'] == true) {
+              if (mounted) setState(() { _paymentStatus = 'paid'; _paymentNote = null; });
+              if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Payment verified and successful.')));
+            } else {
+              await FirestoreService.setBookingPaymentStatus(widget.bookingId, 'failed');
+              if (mounted) setState(() { _paymentStatus = 'failed'; _paymentNote = 'Signature verification failed on the server.'; });
+              if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Payment could not be verified. Status: failed.')));
+            }
+          } catch (e) {
+            if (mounted) setState(() => _paymentNote = 'Payment received but verification is pending: $e');
+            if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Payment received, verification pending: $e')));
+          } finally {
+            if (mounted) setState(() => _paying = false);
+          }
+        };
+        payment.onFailure = (m) {
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Payment: $m')));
+          if (mounted) setState(() => _paying = false);
+        };
+        final opened = payment.openCheckoutWithOrder(
+          keyId: order['keyId'] as String,
+          orderId: order['orderId'] as String,
+          amountInr: widget.totalPrice!,
+          bookingId: widget.bookingId,
+          name: widget.name,
+        );
+        if (!opened) {
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Checkout could not open. Booking stays pending payment.')));
+          if (mounted) setState(() => _paying = false);
+        }
+        return;
+      }
+      // Fallback: functions not deployed. Direct checkout with the
+      // owner-set key (admin Payments tab) or the build-time key.
+      final settings = await FirestoreService.settingsOnce();
+      final keyId = PaymentService.effectiveKeyId(settings.razorpayKeyId);
+      if (keyId == null) {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No Razorpay key configured yet and Cloud Functions are not deployed. Booking stays pending payment; the owner confirms it in the admin app.')));
+        if (mounted) setState(() => _paying = false);
+        return;
+      }
+      payment.onSuccess = (pid, oid, sig) async {
+        await FirestoreService.saveBookingPaymentDetails(widget.bookingId, {
+          'razorpayPaymentId': pid,
+          'razorpayOrderId': oid,
+          'razorpaySignature': sig,
+          'paymentVerification': 'pending_owner_confirmation',
+        });
+        if (mounted) setState(() => _paymentNote = 'Payment received. Awaiting owner confirmation in the admin app (deploy Cloud Functions for automatic verification).');
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Payment received. Owner confirms it in the admin app.')));
+        if (mounted) setState(() => _paying = false);
+      };
+      payment.onFailure = (m) {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Payment: $m')));
+        if (mounted) setState(() => _paying = false);
+      };
+      final opened = payment.openCheckoutDirect(
+        keyId: keyId,
+        amountInr: widget.totalPrice!,
+        bookingId: widget.bookingId,
+        name: widget.name,
+      );
+      if (!opened) {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Checkout could not open. Booking stays pending payment.')));
+        if (mounted) setState(() => _paying = false);
+      }
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Payment error: $e')));
+      if (mounted) setState(() => _paying = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final payment = _payment;
     return Scaffold(
       appBar: AppBar(title: const Text('Booking summary')),
       body: ListView(padding: const EdgeInsets.all(16), children: [
@@ -499,32 +666,14 @@ class _ConfirmationPageState extends State<ConfirmationPage> {
         Text('Base price: ${widget.basePrice == null ? 'TBD (set by owner)' : widget.basePrice.toString()}'),
         Text('Total: ${widget.totalPrice == null ? 'TBD until a base price is set' : widget.totalPrice.toString()}'),
         const SizedBox(height: 8),
-        const Text('Payment status: pending payment (no Razorpay key configured, or total TBD). The owner confirms the booking in the admin app.', style: TextStyle(fontSize: 13)),
+        Row(children: [
+          Expanded(child: Text('Payment status: $_paymentStatus', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold))),
+          TextButton(onPressed: _refreshPaymentStatus, child: const Text('Refresh')),
+        ]),
+        if (_paymentNote != null) Text(_paymentNote!, style: const TextStyle(fontSize: 13)),
         const SizedBox(height: 16),
         FilledButton(
-          onPressed: _paying
-              ? null
-              : () async {
-                  if (widget.totalPrice == null) {
-                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Total is TBD until the owner sets a price. Payment opens once a price exists.')));
-                    return;
-                  }
-                  setState(() => _paying = true);
-                  payment.onSuccess = () {
-                    FirebaseFirestore.instance.collection('bookings').doc(widget.bookingId).update({'paymentStatus': 'paid'});
-                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Payment successful.')));
-                    setState(() => _paying = false);
-                  };
-                  payment.onFailure = (m) {
-                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Payment: $m')));
-                    setState(() => _paying = false);
-                  };
-                  final opened = payment.openCheckout(amountInr: widget.totalPrice!, bookingId: widget.bookingId, name: widget.name);
-                  if (!opened) {
-                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No Razorpay key configured — booking stays pending payment.')));
-                    setState(() => _paying = false);
-                  }
-                },
+          onPressed: _paying ? null : _pay,
           child: const Text('Pay now (Razorpay)'),
         ),
         const SizedBox(height: 8),

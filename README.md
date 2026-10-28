@@ -16,9 +16,10 @@ No preview banner, no AI badge, no AI-made marking anywhere in the app.
 ## What was built — public app (screens)
 
 1. **Profile** — display name, creator name, handle, city, content style,
-   followers line, bio, "Book Kya Bro" button, direct-call button. The
-   direct-call number is the public bio number, shown with a
-   "public bio number, to confirm" note.
+   followers line (from the stats pipeline, labelled by source), bio,
+   "Book Kya Bro" button, direct-call button. Phone and email show only
+   when the owner has set them in the admin app; unset means they are
+   hidden, never a guessed value.
 2. **Viral showcase** — recent viral video card (title, note, tap to open
    the video URL). Empty until the owner sets it in the admin app.
 3. **Engagement** — this week + this month: views, likes, comments, shares.
@@ -42,9 +43,21 @@ No preview banner, no AI badge, no AI-made marking anywhere in the app.
   next-day urgency multiplier setting (owner sets 1.25–1.30, default
   1.25; values outside the range are rejected in the UI and clamped in
   code).
-- **Bookings** — list with detail dialog; Confirm / Done / back-to-New.
-- **Content** — profile text, viral pick, week/month engagement numbers.
+- **Payments** — Razorpay setup: enter the Key ID here and it is saved
+  into Firebase (`content/settings`); the booking app reads it from
+  Firebase at runtime. The secret is never entered here (see "Razorpay"
+  below). Per-booking payment list with Mark paid / Mark failed.
+- **Bookings** — list with detail dialog; Confirm / Done / back-to-New,
+  plus Mark paid / Mark failed for payments.
+- **Content** — profile text, viral pick + viral videos list, week/month
+  engagement numbers, and real-time stats refresh (Instagram live fetch
+  or manual owner entry, always labelled by source).
 - **Slots** — pick a day, block/unblock the whole day, free/block a slot.
+- **SMTP** — SMTP configuration screen (account sunmughan@gmail.com):
+  host, port, user, sender, owner email, test recipient. The password
+  field is used only for the test send tapped right after typing it and
+  is never stored anywhere. Booking mail uses the SMTP_PASS function
+  secret (see "SMTP email" below).
 
 ## Firestore is the source of truth (no hardcoded display content)
 
@@ -60,7 +73,17 @@ content/profile            { displayName, creatorName, handle, city,
 content/viral              { title, videoUrl, note }
 content/engagement         { weekViews, weekLikes, weekComments, weekShares,
                              monthViews, monthLikes, monthComments, monthShares }
-content/settings           { nextDayMultiplier }   // 1.25–1.30, default 1.25
+content/stats              { followersCount, mediaCount, profileUrl, source,
+                             updatedAt, lastError }
+                             source: instagram_graph | manual
+content/smtp               { host, port, user, from, ownerEmail, testRecipient }
+                             NON-SECRET fields only. No password is ever stored here.
+content/settings           { nextDayMultiplier, razorpayKeyId }
+                             nextDayMultiplier: 1.25–1.30, default 1.25
+                             razorpayKeyId: owner-entered in admin Payments tab;
+                             booking app reads it from Firebase at runtime
+viralPicks/<autoId>        { title, videoUrl, note, source, fetchedAt }
+                             newest first; public app shows the top 3
 plans/<planId>             { name, kind, basePrice, durationSeconds, storyCount }
                              kind: weekly | monthly | storyPack | video
                              basePrice null = TBD. Video durations: 30/45/60 only.
@@ -72,12 +95,22 @@ bookings/<autoId>          { name, purpose, type, storyCount?, durationSeconds?,
                              deliveryDue, urgencyTier, multiplier, basePrice,
                              totalPrice?, paymentStatus, status, createdAt }
                              status: new | confirmed | done
-                             paymentStatus: pending_payment | paid
+                             paymentStatus: pending_payment | paid | failed
+                             failed is set only by server signature
+                             verification; a dismissed checkout stays
+                             pending_payment so the booker can retry
+                             razorpayOrderId, razorpayPaymentId,
+                             razorpaySignature, paymentVerification?
+                             emailStatus: sent_to_owner |
+                             skipped_no_owner_email |
+                             skipped_smtp_not_configured
 ```
 
 Starter content: the admin Dashboard button writes profile identity and
-settings only. Engagement numbers and prices are deliberately NOT
-seeded, so the public app never shows invented numbers.
+settings only. Followers, phone, email, engagement numbers and prices
+are deliberately NOT seeded, so the public app never shows an
+unconfirmed number as fact. The owner fills them in the admin app (or
+the stats refresh function writes real values).
 
 ## In-app booking calendar — visible occupancy (two guards)
 
@@ -129,58 +162,114 @@ unset, the multiplier and formula are shown and the total reads
 make the math look complete. Logic lives in `lib/urgency.dart` and is
 unit-tested in `test/urgency_test.dart` (6 tests, all passing).
 
-## Razorpay — placeholder key only
+## Razorpay — full flow, key ID from Firebase, secret server-side only
 
-The key is read only from `--dart-define=RAZORPAY_KEY_ID=...`
-(see `lib/config.dart`; the default is the literal placeholder
-`YOUR_RAZORPAY_KEY_ID_HERE`). No real key is stored anywhere in this
-repo. With no key configured, checkout is skipped gracefully and the
-booking is saved with `paymentStatus = pending_payment`; the owner
-confirms it in the admin app. A payment is never faked as successful.
-Build with a real key when the owner supplies one:
+Flow: booker taps "Pay now" -> the app asks the `createRazorpayOrder`
+Cloud Function for a server-side order -> checkout opens with that
+order id -> on success the app asks the `verifyRazorpayPayment`
+function to verify the signature -> only a server-verified payment
+flips `paymentStatus` to `paid`; a failed verification flips it to
+`failed`; a dismissed checkout stays `pending_payment` so the booker
+can retry. A payment is never marked paid from the client alone.
 
-```
-flutter build apk --dart-define=RAZORPAY_KEY_ID=rzp_live_xxxx
-```
+Key storage, exactly as the owner confirmed it:
 
-## SMTP email — server-side stub, NOT in-app
+- **Key ID:** entered in the admin app Payments tab, saved into the
+  `content/settings` Firestore document, and read by the booking app
+  from Firebase at runtime. No rebuild is needed after changing it.
+  The Key ID is a publishable checkout identifier, not a secret.
+- **Secret:** NEVER in the repo, NEVER in Firestore, NEVER in either
+  app. It lives only as a Cloud Functions secret, used server-side for
+  order creation and signature verification:
+  `firebase functions:secrets:set RAZORPAY_SECRET`, then deploy.
+- **Fallback:** if Cloud Functions are not deployed yet, checkout opens
+  directly with the Firebase key ID (or the build-time
+  `--dart-define=RAZORPAY_KEY_ID=...` fallback) and the booking stays
+  `pending_payment` with the payment ids recorded, so the owner can
+  confirm it manually in the admin app. With no key anywhere, checkout
+  is skipped gracefully and the booking saves as `pending_payment`.
+
+## SMTP email — full implementation, account sunmughan@gmail.com
 
 No SMTP credential is embedded in the app (that would leak it to every
-install). The design is: booking saved to Firestore -> a server-side
-email sender (Cloud Function) sends the SMTP email to Himanshu.
-`functions/index.js` in this repo is that stub: deploy it, set the
-SMTP credentials as Cloud Function secrets (never in code), and it
-sends on every new booking document. Until it is deployed, the
-confirmation screen shows the booking summary for manual sending, and
-the app never claims an email was sent. This is the pending backend
-step, documented honestly — not working email.
+install). `functions/index.js` is the complete server sender:
+
+- **Booking mail:** the `onBookingCreated` trigger fires on every new
+  booking document and emails the owner address from the admin SMTP
+  tab, using the stored host/port/user/sender plus the SMTP_PASS
+  function secret. Booking mail goes ONLY to the owner email, never to
+  the test recipient. If SMTP is not configured, the booking is
+  annotated (`emailStatus: skipped_smtp_not_configured`) and the mail
+  is skipped, never faked as sent.
+- **Test mail:** the admin SMTP tab's "Send test mail" button sends a
+  test mail ONLY to the test recipient (default sunmughan@gmail.com).
+  A password typed in that screen is used for that one test send only
+  and is never stored anywhere; with the field empty, the function
+  uses the stored config plus the SMTP_PASS secret.
+- Set the secret with `firebase functions:secrets:set SMTP_PASS`, then
+  `firebase deploy --only functions`.
+
+## Real-time tracking — stats pipeline, honest about Instagram limits
+
+- **Admin refresh:** the Content tab's "Refresh from Instagram" button
+  calls the `refreshCreatorStats` function, which uses the Instagram
+  Graph API when the owner sets an `INSTAGRAM_ACCESS_TOKEN` secret
+  (token for the @_kya_bro_ account). It writes followers/media counts
+  to `content/stats` with source `instagram_graph` and an update time.
+- **Without a token** the function returns `needs_token` and writes no
+  numbers. On API failure it records only the error note. Numbers are
+  never guessed, and automated unauthenticated scraping is not used:
+  Instagram blocks it and it would violate platform terms.
+- **Manual entry:** the owner can also type a follower count in the
+  admin app; it is stored with source `manual`, and the public app
+  labels it "Set by owner" so a manual number is never presented as a
+  live platform number.
+- **Viral videos:** the admin Content tab maintains the `viralPicks`
+  list (newest first); the public app shows the top 3. Week/month
+  engagement numbers are owner-entered in the admin app until an
+  insights-permitted token makes an automated fetch possible; until
+  then they stay empty rather than estimated.
 
 ## Firebase app status — PREPARED, pending the owner's console step
 
 No Firebase app has been created for Kya Bro yet, and no Google
 sign-in was attempted (the agent has no user Google credentials and
-must not ask for them). Everything else is ready: placeholder config
-via `--dart-define` in `lib/config.dart`, the full collection/document
-layout above, `firestore.rules`, and the admin + public code paths.
+must not ask for them). Everything else is ready: the full
+collection/document layout above, `firestore.rules`,
+`firestore.indexes.json`, `firebase.json`, the Cloud Functions in
+`functions/` (with `functions/package.json`), and the admin + public
+code paths. `.firebaserc` carries the placeholder project id
+`YOUR_FIREBASE_PROJECT_ID`; replace it in step 1.
 
-**Exact steps the user must do in the Firebase console:**
+**Exact steps the user must do (owner steps, in order):**
 
-1. Create a new Firebase project (or use the Codeair apps area) and add
-   an Android app (package `tech.codeair.kya_bro_booking`) and an iOS
-   app (bundle id `tech.codeair.kyaBroBooking`).
-2. Create a Firestore database and deploy `firestore.rules` from this
-   repo (see "Security note" first).
+1. Sign in to Google/Firebase yourself and create a new Firebase
+   project (or use the Codeair apps area). In `.firebaserc`, replace
+   `YOUR_FIREBASE_PROJECT_ID` with the real project id. Add an Android
+   app (package `tech.codeair.kya_bro_booking`) and an iOS app (bundle
+   id `tech.codeair.kyaBroBooking`).
+2. Create a Firestore database and deploy the rules + indexes:
+   `firebase deploy --only firestore`.
 3. Run `flutterfire configure` (or copy the real values) and pass them
    as `--dart-define` values, or replace the placeholder
    `FirebaseOptions` in `lib/main.dart` / `lib/main_admin.dart` with
    the generated `firebase_options.dart`. Do NOT commit real keys to
    this public repo — use `--dart-define` at build time.
-4. In the admin app, tap "Load starter profile content", then fill
-   engagement numbers and plan prices. The public app then shows real
-   content with no code change.
-5. Deploy `functions/index.js` and set SMTP secrets there (see above).
-6. Supply a Razorpay key id at build time (see above) to enable
-   checkout; without it bookings save as pending payment.
+4. Deploy the functions and set the secrets (secret values are typed
+   by you in your own terminal, never shared in chat):
+   `firebase functions:secrets:set RAZORPAY_SECRET`
+   `firebase functions:secrets:set SMTP_PASS`
+   `firebase functions:secrets:set INSTAGRAM_ACCESS_TOKEN` (optional,
+   only for live stats refresh)
+   then `firebase deploy --only functions`.
+5. In the admin app, tap "Load starter profile content", then fill
+   engagement numbers and plan prices; enter the Razorpay Key ID in
+   the Payments tab; fill the SMTP screen (account
+   sunmughan@gmail.com) and send a test mail. The public app then
+   shows real content with no code change.
+6. Build: CI builds Android APK/AAB on every push to main and iOS
+   unsigned .app bundles on the macOS runner (see below). Or build
+   locally with the commands under "Android build".
 
 Until step 3 is done, the apps run but show the honest
 "Firebase is not connected yet" banner and TBD/empty states, and
@@ -197,7 +286,12 @@ an authenticated owner can write content/plans/slots and change
 booking status; the commented authenticated variant is in the rules
 file. The admin APK is distributed to the owner only, not published.
 
-## iOS next step (no macOS host here — NOT built, NOT faked)
+## iOS build code (CI macOS runner — unsigned .app, NOT a signed IPA)
+
+`.github/workflows/ios.yml` builds both apps on `macos-latest` with
+`flutter build ios --release --no-codesign` and uploads the unsigned
+`.app` bundles as artifacts. An unsigned .app is NOT installable on a
+real device as-is. To distribute:
 
 1. On a Mac with Xcode: `cd kya-bro-booking && flutter build ipa`
    (public app) and `flutter build ipa -t lib/main_admin.dart`
@@ -209,7 +303,8 @@ file. The admin APK is distributed to the owner only, not published.
    Calendar writes go through EventKit via `device_calendar`.
 3. Signing: set the development team / bundle id in Xcode, or pass
    `--export-options-plist` for distribution. No store publish is done
-   without a separate order.
+   without a separate order. No signing certificate or provisioning
+   profile lives in this repo.
 
 ## Android build
 
@@ -224,16 +319,18 @@ flutter test                 # urgency + tier tests
 ## Placeholders — complete list (nothing else is placeholder)
 
 - Firebase config values (placeholders until the console step above).
-- Razorpay key id (placeholder until supplied at build time).
+- Razorpay Key ID (unset until the owner enters it in the admin
+  Payments tab; build-time `--dart-define` is only a fallback).
+- Razorpay secret, SMTP password, Instagram token (function secrets
+  only, set by the owner via the Firebase CLI, never in this repo).
 - All plan base prices (TBD until the owner sets them in the admin app).
-- All engagement numbers and the viral pick (empty until the owner
-  sets them in the admin app).
-- Himanshu's email: the starter profile value is literally
-  "to confirm" until the owner fills a real address.
-- SMTP sending: stub only until `functions/index.js` is deployed with
-  secrets set server-side.
+- All engagement numbers, creator stats and viral picks (empty until
+  the owner sets them or the stats function refreshes real values).
+- Himanshu's email and phone (empty until the owner fills a real
+  address/number in the admin app; the starter seed no longer writes
+  any phone, email or follower figure).
 - The direct-call number shown comes from the Firestore profile
-  document (starter value: the public bio number from the brief).
+  document only when the owner has set it.
 
 Video durations are 30 / 45 / 60 seconds only, everywhere. No WhatsApp
 integration. No store publish has been done.
