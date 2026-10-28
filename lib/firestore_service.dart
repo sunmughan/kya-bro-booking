@@ -188,6 +188,17 @@ class FirestoreService {
       .snapshots()
       .map((d) => d.data() == null ? null : SmtpConfig.fromMap(d.data()!));
 
+  /// Instagram connection STATUS stream (content/instagramConnection).
+  /// This document never contains a token — only connected flag,
+  /// username, IG user id and expiry — so it is safe for the admin app
+  /// to read. The token itself is server-side only (adminSecrets).
+  static Stream<InstagramConnection?> instagramConnectionStream() => _db
+      .collection('content')
+      .doc('instagramConnection')
+      .snapshots()
+      .map((d) =>
+          d.data() == null ? null : InstagramConnection.fromMap(d.data()!));
+
   /// Saves NON-SECRET SMTP fields only. The password is never written here:
   /// it is a Cloud Functions secret set by the owner via the Firebase CLI.
   static Future<void> saveSmtpConfig(Map<String, dynamic> data) =>

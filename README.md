@@ -211,15 +211,33 @@ install). `functions/index.js` is the complete server sender:
 
 ## Real-time tracking — stats pipeline, honest about Instagram limits
 
+- **Connect Instagram (no token to copy):** the admin Content tab has
+  a "Connect Instagram" button. The creator taps it, logs in with the
+  @_kya_bro_ Instagram account in the browser, and approves. The
+  browser hands the auth code straight to the server callback
+  (`instagramOAuthCallback`), which exchanges it server-side (code ->
+  short-lived token -> long-lived token, ~60 days) and stores the
+  token where only the server can read it: the
+  `adminSecrets/instagram` Firestore document, which firestore.rules
+  deny to ALL clients. The admin app reads only the token-free status
+  document (`content/instagramConnection`: connected flag, username,
+  IG user id, expiry) — the token never appears in either app, the
+  repo, or chat, and the creator never sees, copies, or pastes one.
 - **Admin refresh:** the Content tab's "Refresh from Instagram" button
-  calls the `refreshCreatorStats` function, which uses the Instagram
-  Graph API when the owner sets an `INSTAGRAM_ACCESS_TOKEN` secret
-  (token for the @_kya_bro_ account). It writes followers/media counts
-  to `content/stats` with source `instagram_graph` and an update time.
-- **Without a token** the function returns `needs_token` and writes no
-  numbers. On API failure it records only the error note. Numbers are
-  never guessed, and automated unauthenticated scraping is not used:
-  Instagram blocks it and it would violate platform terms.
+  calls the `refreshCreatorStats` function, which uses the connected
+  token to read followers/media counts from the Instagram Graph API
+  and writes them to `content/stats` with source `instagram_graph`
+  and an update time. Before expiry (within 7 days) the server
+  refreshes the token itself with the Meta App Secret — no re-login.
+  If the token is dead (expired/revoked), refresh marks the
+  connection `needs_reconnect` and the admin card asks the creator to
+  connect again; no stale numbers are shown as live.
+- **Without a connection** the function returns `needs_token` and
+  writes no numbers. On API failure it records only the error note.
+  Numbers are never guessed, and automated unauthenticated scraping
+  is not used: Instagram blocks it and it would violate platform
+  terms. The old hand-set `INSTAGRAM_ACCESS_TOKEN` function secret
+  still works as a fallback, but the connect button replaces it.
 - **Manual entry:** the owner can also type a follower count in the
   admin app; it is stored with source `manual`, and the public app
   labels it "Set by owner" so a manual number is never presented as a
@@ -229,6 +247,46 @@ install). `functions/index.js` is the complete server sender:
   engagement numbers are owner-entered in the admin app until an
   insights-permitted token makes an automated fetch possible; until
   then they stay empty rather than estimated.
+
+### Connect Instagram — one-time owner setup (do once, then the creator just taps Connect)
+
+The creator's step is only "tap Connect, log in, approve". The setup
+below is the owner's (sunmughan's) one-time work, and it is the only
+part that needs any technical step:
+
+1. Create a Meta developer app at developers.facebook.com and add the
+   Instagram product. Note the App ID (a public identifier, not a
+   secret) and the App Secret.
+2. The @_kya_bro_ Instagram account must be a professional
+   (Business/Creator) account linked to a Facebook Page (Page
+   Settings). Add the creator as a tester on the Meta app: in
+   Development mode only app-role users (admin/developer/tester) can
+   log in and grant permissions, so no App Review is needed for this
+   single-owner connection. For any wider public use, App Review for
+   `instagram_basic` (and `instagram_manage_insights` if media
+   insights are ever added) would be required — not needed here.
+3. Deploy functions, then find the callback URL:
+   `firebase functions:list` (the `instagramOAuthCallback` URL). Paste
+   that URL into the Meta app as a Valid OAuth Redirect URI, and
+   paste the same URL plus the App ID into the admin app's Instagram
+   setup fields (Content tab, shown until setup is complete).
+4. Set the secret (typed by you in your own terminal, never in chat):
+   `firebase functions:secrets:set META_APP_SECRET`
+   then `firebase deploy --only functions`.
+5. In the admin app, the creator taps "Connect Instagram", logs in,
+   and approves the `instagram_basic` + `pages_show_list` permissions
+   (read account info/media and list the linked Page). The admin card
+   then shows "Connected as @username • Token valid until <date>".
+   Disconnect is a button in the same card; it deletes the server-held
+   token immediately.
+
+What is true and what is not: the token lasts ~60 days and refreshes
+itself server-side, but Meta gives no permanent token — if the
+creator changes their Instagram password, revokes the app, or
+unlinks the Page, the connection dies and must be re-connected with
+one tap. The token is never stored in a document any app can read;
+if Firebase Auth is later added, the `content/*` write rules should
+be tightened as the existing security note describes.
 
 ## Firebase app status — PREPARED, pending the owner's console step
 
@@ -259,9 +317,11 @@ code paths. `.firebaserc` carries the placeholder project id
    by you in your own terminal, never shared in chat):
    `firebase functions:secrets:set RAZORPAY_SECRET`
    `firebase functions:secrets:set SMTP_PASS`
-   `firebase functions:secrets:set INSTAGRAM_ACCESS_TOKEN` (optional,
-   only for live stats refresh)
-   then `firebase deploy --only functions`.
+   `firebase functions:secrets:set META_APP_SECRET` (Instagram connect)
+   then `firebase deploy --only functions`. The old
+   `INSTAGRAM_ACCESS_TOKEN` secret still works as a fallback but is no
+   longer the way to connect — use the Connect Instagram button (see
+   "Connect Instagram" above).
 5. In the admin app, tap "Load starter profile content", then fill
    engagement numbers and plan prices; enter the Razorpay Key ID in
    the Payments tab; fill the SMTP screen (account
@@ -321,8 +381,10 @@ flutter test                 # urgency + tier tests
 - Firebase config values (placeholders until the console step above).
 - Razorpay Key ID (unset until the owner enters it in the admin
   Payments tab; build-time `--dart-define` is only a fallback).
-- Razorpay secret, SMTP password, Instagram token (function secrets
+- Razorpay secret, SMTP password, Meta App Secret (function secrets
   only, set by the owner via the Firebase CLI, never in this repo).
+  The Instagram token itself is never in this repo at all: it is
+  created by the Connect Instagram button and held server-side only.
 - All plan base prices (TBD until the owner sets them in the admin app).
 - All engagement numbers, creator stats and viral picks (empty until
   the owner sets them or the stats function refreshes real values).

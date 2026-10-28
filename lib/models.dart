@@ -91,14 +91,76 @@ class Plan {
 class AppSettings {
   final double nextDayMultiplier; // owner-set, clamped to 1.25..1.30
   final String? razorpayKeyId; // owner-set in admin Payments tab; null = unset
-  const AppSettings({required this.nextDayMultiplier, this.razorpayKeyId});
+  // Meta App ID (public identifier, NOT a secret) and the deployed
+  // instagramOAuthCallback function URL. Both are entered once by the
+  // owner during the one-time Instagram setup (see README "Connect
+  // Instagram"); the admin app uses them to build the OAuth login URL.
+  // The token itself never passes through this document.
+  final String? metaAppId, instagramCallbackUrl;
+  const AppSettings({
+    required this.nextDayMultiplier,
+    this.razorpayKeyId,
+    this.metaAppId,
+    this.instagramCallbackUrl,
+  });
   factory AppSettings.fromMap(Map<String, dynamic> m) {
     final v = (m['nextDayMultiplier'] as num?)?.toDouble() ?? 1.25;
     final key = (m['razorpayKeyId'] as String?)?.trim();
+    final appId = (m['metaAppId'] as String?)?.trim();
+    final cb = (m['instagramCallbackUrl'] as String?)?.trim();
     return AppSettings(
       nextDayMultiplier: v < 1.25 || v > 1.30 ? 1.25 : v,
       razorpayKeyId: key == null || key.isEmpty ? null : key,
+      metaAppId: appId == null || appId.isEmpty ? null : appId,
+      instagramCallbackUrl: cb == null || cb.isEmpty ? null : cb,
     );
+  }
+}
+
+/// Instagram connection status (content/instagramConnection). This
+/// document NEVER contains a token: it holds only the connected flag, the
+/// public username, the IG user id, and the token expiry date, so the
+/// admin app can show state honestly without ever seeing the token.
+/// The token itself lives server-side only, in the Admin-SDK-only
+/// `adminSecrets/instagram` document (firestore.rules deny all client
+/// access there); see functions/index.js.
+class InstagramConnection {
+  final bool connected;
+  final String? username, igUserId, expiresAtIso, lastError;
+  final bool needsReconnect;
+  const InstagramConnection({
+    required this.connected,
+    this.username,
+    this.igUserId,
+    this.expiresAtIso,
+    this.lastError,
+    this.needsReconnect = false,
+  });
+  factory InstagramConnection.fromMap(Map<String, dynamic> m) =>
+      InstagramConnection(
+        connected: m['connected'] == true,
+        username: m['username'] as String?,
+        igUserId: m['igUserId'] as String?,
+        expiresAtIso: m['expiresAt'] as String?,
+        lastError: m['lastError'] as String?,
+        needsReconnect: m['needsReconnect'] == true,
+      );
+
+  DateTime? get expiresAt =>
+      expiresAtIso == null ? null : DateTime.tryParse(expiresAtIso!);
+
+  /// True when the token expiry date is known and already past.
+  bool get isExpired {
+    final e = expiresAt;
+    return e != null && DateTime.now().isAfter(e);
+  }
+
+  /// Refresh is due when expiry is within 7 days (Meta long-lived tokens
+  /// last ~60 days; refresh is a server-side exchange, no re-login).
+  bool get refreshDue {
+    final e = expiresAt;
+    if (e == null) return false;
+    return DateTime.now().isAfter(e.subtract(const Duration(days: 7)));
   }
 }
 

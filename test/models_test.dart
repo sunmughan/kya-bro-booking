@@ -27,6 +27,48 @@ void main() {
       );
       expect(AppSettings.fromMap({'razorpayKeyId': '  '}).razorpayKeyId, isNull);
     });
+    test('metaAppId and instagramCallbackUrl are null when unset', () {
+      expect(AppSettings.fromMap({}).metaAppId, isNull);
+      expect(AppSettings.fromMap({}).instagramCallbackUrl, isNull);
+      expect(
+        AppSettings.fromMap({'metaAppId': '123', 'instagramCallbackUrl': 'https://example.invalid/cb'}).metaAppId,
+        '123',
+      );
+    });
+  });
+
+  group('InstagramConnection', () {
+    test('connected flag and username parse', () {
+      final c = InstagramConnection.fromMap({
+        'connected': true,
+        'username': 'kya_bro_',
+        'igUserId': '17841',
+        'expiresAt': '2099-01-01T00:00:00.000Z',
+      });
+      expect(c.connected, isTrue);
+      expect(c.username, 'kya_bro_');
+      expect(c.isExpired, isFalse);
+      expect(c.refreshDue, isFalse);
+    });
+    test('expired token reports expired and refresh due', () {
+      final c = InstagramConnection.fromMap({
+        'connected': true,
+        'expiresAt': '2020-01-01T00:00:00.000Z',
+      });
+      expect(c.isExpired, isTrue);
+      expect(c.refreshDue, isTrue);
+    });
+    test('expiry within 7 days reports refresh due but not expired', () {
+      final soon = DateTime.now().add(const Duration(days: 3)).toIso8601String();
+      final c = InstagramConnection.fromMap({'connected': true, 'expiresAt': soon});
+      expect(c.isExpired, isFalse);
+      expect(c.refreshDue, isTrue);
+    });
+    test('unknown expiry is neither expired nor refresh-due', () {
+      final c = InstagramConnection.fromMap({'connected': false});
+      expect(c.isExpired, isFalse);
+      expect(c.refreshDue, isFalse);
+    });
   });
 
   group('CreatorStats', () {

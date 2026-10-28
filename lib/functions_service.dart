@@ -71,9 +71,24 @@ class FunctionsService {
   ]) =>
       _call('sendTestMail', transientSmtp == null ? {} : {'smtp': transientSmtp});
 
-  /// Refreshes creator stats from the Instagram Graph API when the owner
-  /// has set an access token secret; otherwise returns
+  /// Refreshes creator stats from the Instagram Graph API. Works when
+  /// the creator connected via the admin app's Connect Instagram button
+  /// (server-held token) or when the owner set the legacy
+  /// INSTAGRAM_ACCESS_TOKEN secret; otherwise returns
   /// {'status': 'needs_token'} and writes nothing. Never invents numbers.
   static Future<Map<String, dynamic>> refreshCreatorStats() =>
       _call('refreshCreatorStats', {});
+
+  /// Returns {'url': <Facebook OAuth login URL>} for the Connect
+  /// Instagram button. The server builds the URL from the owner-entered
+  /// Meta App ID + callback URL in content/settings. No token is ever
+  /// returned to the app: the browser login hands the auth code straight
+  /// to the server callback, which exchanges it server-side.
+  static Future<Map<String, dynamic>> getInstagramConnectUrl() =>
+      _call('getInstagramConnectUrl', {});
+
+  /// Deletes the server-held Instagram token and marks the connection
+  /// disconnected. The token never passes through the app.
+  static Future<Map<String, dynamic>> disconnectInstagram() =>
+      _call('disconnectInstagram', {});
 }

@@ -1,5 +1,6 @@
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'config.dart';
 import 'firestore_service.dart';
 import 'functions_service.dart';
@@ -469,6 +470,134 @@ class BookingsPage extends StatelessWidget {
   }
 }
 
+/// Connect Instagram card (admin Content tab).
+///
+/// The creator never sees, copies, or pastes a token: tapping Connect
+/// opens the official Facebook/Instagram login in the browser, the
+/// creator logs in and approves, and the browser hands the auth code
+/// straight to the server callback, which exchanges it server-side and
+/// stores the long-lived token where only the server can read it
+/// (adminSecrets/instagram — firestore.rules deny all client access).
+/// This card reads only the token-free status document
+/// (content/instagramConnection), so the app itself never holds a token.
+/// If the one-time owner setup (Meta App ID + callback URL, see README
+/// "Connect Instagram") is missing, the card says so and offers the two
+/// setup fields instead of a dead button.
+class InstagramConnectCard extends StatefulWidget {
+  const InstagramConnectCard({super.key});
+  @override
+  State<InstagramConnectCard> createState() => _InstagramConnectCardState();
+}
+
+class _InstagramConnectCardState extends State<InstagramConnectCard> {
+  final _appId = TextEditingController(), _callback = TextEditingController();
+  bool _setupLoaded = false;
+  bool _busy = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<AppSettings>(
+      stream: FirestoreService.settingsStream(),
+      builder: (c, ss) {
+        final settings = ss.data;
+        if (!_setupLoaded) {
+          _appId.text = settings?.metaAppId ?? '';
+          _callback.text = settings?.instagramCallbackUrl ?? '';
+          _setupLoaded = true;
+        }
+        final setupDone = (settings?.metaAppId?.isNotEmpty ?? false) &&
+            (settings?.instagramCallbackUrl?.isNotEmpty ?? false);
+        return StreamBuilder<InstagramConnection?>(
+          stream: FirestoreService.instagramConnectionStream(),
+          builder: (c, s) {
+            final conn = s.data;
+            final connected = conn?.connected == true && !(conn?.isExpired ?? false);
+            final needsReconnect =
+                conn?.needsReconnect == true || (conn?.isExpired ?? false);
+            return Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Instagram connection', style: TextStyle(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 4),
+                    if (!setupDone) ...[
+                      const Text('One-time owner setup is missing: enter the Meta App ID and the deployed instagramOAuthCallback function URL (see README "Connect Instagram"). Until then the Connect button stays hidden — the creator is never asked for a token.'),
+                      const SizedBox(height: 8),
+                      TextField(controller: _appId, decoration: const InputDecoration(labelText: 'Meta App ID (public identifier, not a secret)', border: OutlineInputBorder())),
+                      const SizedBox(height: 8),
+                      TextField(controller: _callback, decoration: const InputDecoration(labelText: 'Callback function URL (from firebase functions:list)', border: OutlineInputBorder())),
+                      const SizedBox(height: 8),
+                      FilledButton(
+                        onPressed: () async {
+                          await FirestoreService.saveSettings({
+                            'metaAppId': _appId.text.trim(),
+                            'instagramCallbackUrl': _callback.text.trim(),
+                          });
+                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Instagram setup saved.')));
+                        },
+                        child: const Text('Save Instagram setup'),
+                      ),
+                    ] else if (connected) ...[
+                      Text('Connected as @${conn!.username ?? 'unknown'} • Token valid until ${conn.expiresAtIso ?? 'unknown'}'),
+                      const Text('Live stats refresh uses this connection. The token refreshes itself server-side before expiry; if it ever expires or is revoked, this card asks to connect again.', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                      const SizedBox(height: 8),
+                      OutlinedButton(
+                        onPressed: _busy
+                            ? null
+                            : () async {
+                                setState(() => _busy = true);
+                                try {
+                                  await FunctionsService.disconnectInstagram();
+                                  if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Instagram disconnected. Live refresh now reports "needs token" until you connect again.')));
+                                } catch (e) {
+                                  if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Disconnect failed: $e')));
+                                } finally {
+                                  if (mounted) setState(() => _busy = false);
+                                }
+                              },
+                        child: const Text('Disconnect Instagram'),
+                      ),
+                    ] else ...[
+                      Text(needsReconnect
+                          ? 'Connection expired or revoked — connect again. ${conn?.lastError ?? ''}'
+                          : 'Not connected. Tap Connect, log in with the @_kya_bro_ Instagram account in the browser, and approve — no token to copy or paste.'),
+                      const SizedBox(height: 8),
+                      FilledButton(
+                        onPressed: _busy
+                            ? null
+                            : () async {
+                                setState(() => _busy = true);
+                                try {
+                                  final r = await FunctionsService.getInstagramConnectUrl();
+                                  final url = r['url'] as String?;
+                                  if (url == null || url.isEmpty) throw Exception('Server did not return a login URL.');
+                                  final ok = await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+                                  if (!ok) throw Exception('Could not open the browser.');
+                                  if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Browser opened: log in and approve, then return here — the connection appears automatically.')));
+                                } catch (e) {
+                                  if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Connect failed: $e')));
+                                } finally {
+                                  if (mounted) setState(() => _busy = false);
+                                }
+                              },
+                        child: const Text('Connect Instagram'),
+                      ),
+                    ],
+                    if (conn?.lastError != null && !connected)
+                      Text('Last note: ${conn!.lastError}', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
 class ContentPage extends StatefulWidget {
   const ContentPage({super.key});
   @override
@@ -485,6 +614,8 @@ class _ContentPageState extends State<ContentPage> {
   Widget build(BuildContext context) {
     return ListView(padding: const EdgeInsets.all(16), children: [
       const Text('Real-time stats (Himanshu @_kya_bro_)', style: TextStyle(fontWeight: FontWeight.bold)),
+      const InstagramConnectCard(),
+      const SizedBox(height: 16),
       StreamBuilder<CreatorStats?>(
         stream: FirestoreService.statsStream(),
         builder: (c, s) {
@@ -526,7 +657,7 @@ class _ContentPageState extends State<ContentPage> {
                     child: const Text('Save manual'),
                   ),
                 ]),
-                const Text('Live fetch needs an Instagram access token secret (INSTAGRAM_ACCESS_TOKEN) on the functions. Without it the refresh reports "needs token" and writes nothing — numbers are never guessed. Manual entries are always labelled as owner-set in the public app.', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                const Text('Live fetch uses the Instagram connection above (Connect Instagram button). Without a connection the refresh reports "needs token" and writes nothing — numbers are never guessed. Manual entries are always labelled as owner-set in the public app.', style: TextStyle(fontSize: 12, color: Colors.grey)),
               ]),
             ),
           );
